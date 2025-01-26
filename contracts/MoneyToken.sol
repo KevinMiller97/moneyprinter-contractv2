@@ -23,7 +23,6 @@ import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 ||====================================================================||
 */
 
-
 contract MoneyToken is
     ERC20Upgradeable,
     ERC20BurnableUpgradeable,
@@ -32,10 +31,11 @@ contract MoneyToken is
     address private bondsNFTContract;
     address private airdropContract;
     address private taxAccount;
-    uint256 public constant INITIAL_SUPPLY = 1000000 * 10 ** 18;
+    uint256 public constant INITIAL_SUPPLY = 100000000 * 10 ** 18;
     uint256 public constant TAX_PERCENTAGE = 2;
 
     error UnauthorizedNotBond();
+    error InvalidTaxAccount();
     event BondNFTAddressSet(address indexed newAddress);
     event AirdropAddressSet(address indexed newAddress);
     event TaxAccountChanged(address indexed newTaxAccount);
@@ -49,7 +49,6 @@ contract MoneyToken is
         __ERC20_init("Legal Tender", "MONEY");
         __ERC20Burnable_init();
         __Ownable_init(initialOwner);
-        _transferOwnership(initialOwner);
         _mint(initialOwner, INITIAL_SUPPLY);
         taxAccount = initialOwner;
     }
@@ -65,6 +64,7 @@ contract MoneyToken is
     }
 
     function setTaxAccount(address newTaxAccount) public onlyOwner {
+        if (newTaxAccount == address(0)) revert InvalidTaxAccount();
         taxAccount = newTaxAccount;
         emit TaxAccountChanged(newTaxAccount);
     }
@@ -81,8 +81,11 @@ contract MoneyToken is
         ) {
             return super.transfer(recipient, amount);
         }
-        uint256 taxAmount = (amount * TAX_PERCENTAGE) / 100;
+        
+        uint256 taxAmount = (amount * TAX_PERCENTAGE + 99) / 100; // Round up
+        if (taxAmount > amount) taxAmount = amount;
         uint256 sendAmount = amount - taxAmount;
+        
         _transfer(_msgSender(), taxAccount, taxAmount);
         emit TaxApplied(_msgSender(), recipient, taxAmount);
         _transfer(_msgSender(), recipient, sendAmount);
@@ -102,8 +105,11 @@ contract MoneyToken is
         ) {
             return super.transferFrom(sender, recipient, amount);
         }
-        uint256 taxAmount = (amount * TAX_PERCENTAGE) / 100;
+        
+        uint256 taxAmount = (amount * TAX_PERCENTAGE + 99) / 100; // Round up
+        if (taxAmount > amount) taxAmount = amount;
         uint256 sendAmount = amount - taxAmount;
+        
         _spendAllowance(sender, _msgSender(), amount);
         _transfer(sender, taxAccount, taxAmount);
         emit TaxApplied(sender, recipient, taxAmount);
@@ -111,7 +117,6 @@ contract MoneyToken is
         return true;
     }
 
-    // Modifier to restrict minting to only the BOND NFT contract
     modifier onlyBond() {
         if (msg.sender != bondsNFTContract) {
             revert UnauthorizedNotBond();

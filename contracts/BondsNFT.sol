@@ -16,21 +16,13 @@ contract BondsNFT is
 
     uint256 public constant CLAIM_INTERVAL = 1 minutes;
     uint256 public constant BOND_LIFETIME = 1 weeks;
-    uint256 public constant ETH_TAX = 50; // later divided by 1000
-
-    uint256 public BOND_PRICE_MONEY;
-    uint256 public BOND_PRICE_ETH;
-
-    uint256 private ethBondFeesCollected;
 
     struct Bond {
         uint256 interestRate; // Stored as percentage times 100 (e.g., 950 for 9.5%)
         uint256 mintTime;
         uint256 lastClaimTime;
         uint256 principal;
-        uint256 principalMoneyEquivalent;
         bool principalClaimed;
-        bool principalInEth;
     }
 
     mapping(uint256 => Bond) public bonds;
@@ -39,12 +31,13 @@ contract BondsNFT is
     error BondExpired();
     error ClaimIntervalNotReached();
     error PrincipalAlreadyClaimed();
+    error PrincipalTooLow();
+
     event Minted(uint256 tokenId, address indexed newAddress);
     event InterestClaimed(uint256 tokenId, address indexed claimAddress);
     event PrincipalClaimed(uint256 tokenId, address indexed claimAddress);
-    event BondPriceChangeMoney(uint256 amount);
-    event BondPriceChangeEth(uint256 amount);
     event ClaimInterestFailed(uint256 indexed tokenId, bytes reason);
+    event MinimumPrincipalChanged(uint256 minimumPrincipal);
 
     function initialize(address initialOwner) public initializer {
         __ERC721_init("Federal Reserve Bond", "BOND");
@@ -52,9 +45,6 @@ contract BondsNFT is
         __Ownable_init(initialOwner);
         __ReentrancyGuard_init();
         _transferOwnership(initialOwner);
-
-        BOND_PRICE_MONEY = 1000 * 10 ** 18;
-        BOND_PRICE_ETH = 0.03 ether;
     }
 
     function setMoneyTokenAddress(address _moneyTokenAddress) public onlyOwner {
@@ -63,78 +53,23 @@ contract BondsNFT is
         moneyToken = MoneyToken(_moneyTokenAddress);
     }
 
-    // used to potentially adjust for inflation down the line. Will not affect Holders of existing BondNFT's
-    function setBondPriceMoney(uint256 _bondPriceMoney) public onlyOwner {
-        BOND_PRICE_MONEY = _bondPriceMoney;
-        emit BondPriceChangeMoney(BOND_PRICE_MONEY);
-    }
-
-    // used to adjust for market cap of $MONEY. Will not affect Holders of existing BondNFT's
-    function setBondPriceEth(uint256 _bondPriceEth) public onlyOwner {
-        BOND_PRICE_ETH = _bondPriceEth;
-        emit BondPriceChangeEth(BOND_PRICE_ETH);
-    }
-
-    function mintMultipleBonds(uint256 numberOfBonds) public {
-        if (numberOfBonds == 0) revert("Must mint at least one bond");
-        uint256 totalCost = BOND_PRICE_MONEY * numberOfBonds;
+    function mintBond(uint256 principalAmount) public {
         require(
-            moneyToken.transferFrom(msg.sender, address(this), totalCost),
-            "Transfer failed"
+            moneyToken.transferFrom(msg.sender, address(this), principalAmount),
+            "Transfer failed: insufficient allowance or balance"
         );
 
-        for (uint256 i = 0; i < numberOfBonds; i++) {
-            uint256 tokenId = totalSupply() + 1;
-            uint256 interestRate = _generateRandomInterestRate();
-            _safeMint(msg.sender, tokenId);
-            bonds[tokenId] = Bond(
-                interestRate,
-                block.timestamp,
-                block.timestamp,
-                BOND_PRICE_MONEY,
-                BOND_PRICE_MONEY,
-                false,
-                false
-            );
-            emit Minted(tokenId, msg.sender);
-        }
-    }
-
-    function mintMultipleBondsETH(uint256 numberOfBonds) public payable {
-        if (numberOfBonds == 0) revert("Must mint at least one bond");
-
-        // Calculate the total ETH cost including fees
-        uint256 totalCostETH = BOND_PRICE_ETH * numberOfBonds;
-        uint256 totalFeeETH = ((BOND_PRICE_ETH * ETH_TAX) / 1000) *
-            numberOfBonds;
-        uint256 totalETHRequired = totalCostETH + totalFeeETH;
-
-        // Check if sufficient ETH was sent
-        if (msg.value < totalETHRequired) revert("Insufficient ETH sent");
-
-        // Collect the total fee into the contract's balance
-        ethBondFeesCollected += totalFeeETH;
-
-        for (uint256 i = 0; i < numberOfBonds; i++) {
-            uint256 tokenId = totalSupply() + 1;
-            uint256 interestRate = _generateRandomInterestRate();
-            _safeMint(msg.sender, tokenId);
-            bonds[tokenId] = Bond(
-                interestRate,
-                block.timestamp,
-                block.timestamp,
-                BOND_PRICE_ETH,
-                BOND_PRICE_MONEY,
-                false,
-                true
-            );
-            emit Minted(tokenId, msg.sender);
-        }
-
-        // Refund any excess ETH sent
-        if (msg.value > totalETHRequired) {
-            payable(msg.sender).transfer(msg.value - totalETHRequired);
-        }
+        uint256 tokenId = totalSupply() + 1;
+        uint256 interestRate = _generateRandomInterestRate();
+        _safeMint(msg.sender, tokenId);
+        bonds[tokenId] = Bond(
+            interestRate,
+            block.timestamp,
+            block.timestamp,
+            principalAmount,
+            false
+        );
+        emit Minted(tokenId, msg.sender);
     }
 
     function claimInterest(uint256 tokenId) public nonReentrant {
@@ -159,7 +94,7 @@ contract BondsNFT is
             revert ClaimIntervalNotReached();
 
         // Calculate the interest accrued per interval and total interest to be claimed
-        uint256 interestPerInterval = (bond.principalMoneyEquivalent *
+        uint256 interestPerInterval = (bond.principal *
             bond.interestRate *
             CLAIM_INTERVAL) / (10000 * 1 days);
         uint256 totalInterest = interestPerInterval * claimableIntervals;
@@ -192,24 +127,14 @@ contract BondsNFT is
 
         bond.principalClaimed = true; // Update state before external calls
 
-        if (bond.principalInEth) {
-            uint256 amount = bond.principal -
-                ((bond.principal * ETH_TAX) / 1000);
-            require(
-                address(this).balance >= amount,
-                "Insufficient ETH in contract"
-            );
-            payable(msg.sender).transfer(amount);
-        } else {
-            require(
-                moneyToken.balanceOf(address(this)) >= bond.principal,
-                "Insufficient MoneyToken in contract"
-            );
-            require(
-                moneyToken.transfer(msg.sender, bond.principal),
-                "Transfer failed"
-            );
-        }
+        require(
+            moneyToken.balanceOf(address(this)) >= bond.principal,
+            "Insufficient MoneyToken in contract"
+        );
+        require(
+            moneyToken.transfer(msg.sender, bond.principal),
+            "Transfer failed"
+        );
         emit PrincipalClaimed(tokenId, msg.sender);
     }
 
@@ -250,7 +175,7 @@ contract BondsNFT is
         uint256 timeSinceLastClaim = endTime - lastClaimTime;
         uint256 claimableIntervals = timeSinceLastClaim / CLAIM_INTERVAL;
 
-        uint256 interestPerInterval = (bond.principalMoneyEquivalent *
+        uint256 interestPerInterval = (bond.principal *
             bond.interestRate *
             CLAIM_INTERVAL) / (10000 * 1 days);
         uint256 totalInterest = interestPerInterval * claimableIntervals;
@@ -270,24 +195,8 @@ contract BondsNFT is
             )
         );
 
-        uint256 interestRate = ((randomNumber % 31) + 10) * 10; // Range 10 to 40
+        uint256 interestRate = ((randomNumber % 16) + 10) * 10; // Range 1 to 2.5
         return interestRate; // Represents an interest rate with one decimal place (e.g., 23 = 2.3%)
-    }
-
-    function withdrawETHFees() public onlyOwner {
-        uint256 withdrawalAmount = ethBondFeesCollected;
-        uint256 contractBalance = address(this).balance;
-
-        require(
-            contractBalance >= withdrawalAmount,
-            "Insufficient balance in contract"
-        );
-        require(withdrawalAmount > 0, "No fees to withdraw");
-
-        ethBondFeesCollected = 0; // Reset before transfer to prevent reentrancy
-
-        (bool success, ) = owner().call{value: withdrawalAmount}("");
-        require(success, "Failed to send ether");
     }
 
     // Storage gap for upgradeability

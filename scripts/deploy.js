@@ -1,7 +1,13 @@
 const { ethers, upgrades } = require('hardhat');
 
 async function main() {
-  const [deployer, addr1] = await ethers.getSigners();
+  // localhost testing
+  // const [deployer, addr1] = await ethers.getSigners();
+
+  // AVAX testing
+  // Use custom provider and wallet
+  const provider = new ethers.JsonRpcProvider(process.env.SEPOLIA_RPC_URL);
+  const deployer = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
 
   console.log('Deploying contracts with the account:', deployer.address);
 
